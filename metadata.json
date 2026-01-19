@@ -1,0 +1,7 @@
+{
+  "name": "Voice Note Script Generator",
+  "description": "Transform business research into high-converting voice note scripts and micro-text follow-ups using the Value-First framework.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
