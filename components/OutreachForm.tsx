@@ -1,6 +1,6 @@
 
 import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { Wand2, Loader2, Clipboard, Check, User, Building, AlertTriangle, Gift, Globe, Mic, Zap, Target, Palette, Sparkles, MessageSquare, Clock, Gauge, Lightbulb, Save, Bookmark, Play, Volume2, Headset, X } from 'lucide-react';
+import { Wand2, Loader2, Clipboard, Check, User, Building, AlertTriangle, Gift, Mic, Sparkles, MessageSquare, Gauge, Lightbulb, Bookmark, Volume2, X, Palette, Headset } from 'lucide-react';
 import { generateVoiceNote, processAudioResearch, generateSpeech, decodeBase64, decodeAudioData } from '../services/geminiService';
 import { GenerationStatus, VoiceNoteInput, VoiceNoteResult, CustomTemplate, SavedScript, VoiceOption } from '../types';
 import TemplateManager, { TemplateManagerHandle } from './TemplateManager';
@@ -21,6 +21,7 @@ interface OutreachFormProps {
 const OutreachForm: React.FC<OutreachFormProps> = ({ initialReference, onClearReference }) => {
   const templateManagerRef = useRef<TemplateManagerHandle>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const activeSourceRef = useRef<AudioBufferSourceNode | null>(null);
   
   const [formData, setFormData] = useState<VoiceNoteInput>({
     ownerName: '',
@@ -36,6 +37,7 @@ const OutreachForm: React.FC<OutreachFormProps> = ({ initialReference, onClearRe
   const [activeTemplate, setActiveTemplate] = useState<CustomTemplate | null>(null);
   const [result, setResult] = useState<VoiceNoteResult | null>(null);
   const [status, setStatus] = useState<GenerationStatus>(GenerationStatus.IDLE);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [ttsLoading, setTtsLoading] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   
@@ -44,7 +46,18 @@ const OutreachForm: React.FC<OutreachFormProps> = ({ initialReference, onClearRe
   const [isSavedInLibrary, setIsSavedInLibrary] = useState(false);
 
   useEffect(() => {
-    if (result) setIsSavedInLibrary(false);
+    return () => {
+      if (audioContextRef.current) {
+        audioContextRef.current.close();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (result) {
+      setIsSavedInLibrary(false);
+      setErrorMessage(null);
+    }
   }, [result]);
 
   const estimatedDuration = useMemo(() => {
@@ -62,6 +75,7 @@ const OutreachForm: React.FC<OutreachFormProps> = ({ initialReference, onClearRe
 
   const handleAudioCaptured = async (base64: string, mimeType: string) => {
     try {
+      setErrorMessage(null);
       const data = await processAudioResearch(base64, mimeType);
       setFormData(prev => ({
         ...prev,
@@ -70,25 +84,37 @@ const OutreachForm: React.FC<OutreachFormProps> = ({ initialReference, onClearRe
         identifiedGap: data.identifiedGap || prev.identifiedGap,
         freeValue: data.freeValue || prev.freeValue,
       }));
-    } catch (err) {
-      console.error("Transcription error:", err);
-      throw err;
+    } catch (err: any) {
+      setErrorMessage(err.message || "Failed to process audio.");
     }
+  };
+
+  const validateFields = (): boolean => {
+    const requiredFields: (keyof VoiceNoteInput)[] = ['ownerName', 'businessName', 'identifiedGap', 'freeValue'];
+    for (const field of requiredFields) {
+      if (!formData[field] || (formData[field] as string).trim().length < 2) {
+        setErrorMessage(`Please provide a valid value for ${field.replace(/([A-Z])/g, ' $1').toLowerCase()}.`);
+        return false;
+      }
+    }
+    return true;
   };
 
   const handleGenerate = async () => {
     if (status === GenerationStatus.LOADING) return;
-    if (!formData.ownerName || !formData.businessName || !formData.identifiedGap || !formData.freeValue) {
-      alert("Please fill in all research fields.");
-      return;
-    }
+    setErrorMessage(null);
+    
+    if (!validateFields()) return;
+
     setStatus(GenerationStatus.LOADING);
     setResult(null);
+    
     try {
       const data = await generateVoiceNote(formData, activeTemplate || undefined, initialReference || undefined);
       setResult(data);
       setStatus(GenerationStatus.SUCCESS);
-    } catch (error) {
+    } catch (error: any) {
+      setErrorMessage(error.message || "Something went wrong.");
       setStatus(GenerationStatus.ERROR);
     }
   };
@@ -96,6 +122,8 @@ const OutreachForm: React.FC<OutreachFormProps> = ({ initialReference, onClearRe
   const handlePlayTTS = async () => {
     if (!result || ttsLoading || isPlaying) return;
     setTtsLoading(true);
+    setErrorMessage(null);
+
     try {
       const base64Audio = await generateSpeech(result.script, formData.selectedVoice, formData.tone);
       
@@ -106,16 +134,25 @@ const OutreachForm: React.FC<OutreachFormProps> = ({ initialReference, onClearRe
       const audioBytes = decodeBase64(base64Audio);
       const audioBuffer = await decodeAudioData(audioBytes, ctx);
       
+      if (activeSourceRef.current) {
+        activeSourceRef.current.stop();
+      }
+
       const source = ctx.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(ctx.destination);
-      source.onended = () => setIsPlaying(false);
       
+      source.onended = () => {
+        setIsPlaying(false);
+        activeSourceRef.current = null;
+      };
+      
+      activeSourceRef.current = source;
       setIsPlaying(true);
       source.start();
-    } catch (error) {
-      console.error("Audio playback error:", error);
-      alert("Could not generate audio. Please try again.");
+    } catch (error: any) {
+      setErrorMessage(error.message || "Audio playback failed.");
+      setTtsLoading(false);
     } finally {
       setTtsLoading(false);
     }
@@ -130,14 +167,6 @@ const OutreachForm: React.FC<OutreachFormProps> = ({ initialReference, onClearRe
       setCopiedFollowUp(true);
       setTimeout(() => setCopiedFollowUp(false), 2000);
     }
-  };
-
-  const handleSaveAsTemplate = () => {
-    if (!result?.script) return;
-    let genericTemplate = result.script;
-    if (formData.ownerName) genericTemplate = genericTemplate.split(formData.ownerName).join('[ownerName]');
-    if (formData.businessName) genericTemplate = genericTemplate.split(formData.businessName).join('[businessName]');
-    templateManagerRef.current?.initNewTemplate(genericTemplate);
   };
 
   const handleSaveToLibrary = () => {
@@ -313,6 +342,13 @@ const OutreachForm: React.FC<OutreachFormProps> = ({ initialReference, onClearRe
               </div>
             </div>
 
+            {errorMessage && (
+              <div className="md:col-span-2 flex items-center gap-2 p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-sm animate-in fade-in slide-in-from-top-1">
+                <X size={16} />
+                {errorMessage}
+              </div>
+            )}
+
             <button
               onClick={handleGenerate}
               disabled={status === GenerationStatus.LOADING}
@@ -325,7 +361,7 @@ const OutreachForm: React.FC<OutreachFormProps> = ({ initialReference, onClearRe
                 </>
               ) : (
                 <>
-                  <Sparkles size={20} />
+                  <Wand2 size={20} />
                   <span>Generate High-Converting Script</span>
                 </>
               )}
